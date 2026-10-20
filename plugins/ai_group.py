@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import random
 import re
 import sys
@@ -245,6 +246,28 @@ async def _explicit_search(user_msg: str, who: str) -> str | None:
     return f"{who}用 @@ 让你查「{q}」，但没搜到东西，实话实说搜不到。"
 
 
+# base64 编解码命令：`编码/加密/b64 xxx` 编码，`解码/解密/b64d xxx` 解码
+BASE64_ENC = re.compile(r"^(?:b64e|b64|编码|加密)\s+(.+)$", re.IGNORECASE)
+BASE64_DEC = re.compile(r"^(?:b64d|unb64|解码|解密)\s+(.+)$", re.IGNORECASE)
+
+
+def _try_base64(text: str) -> tuple[bool, str] | None:
+    """base64 编解码命令。命中返回 (成功, 结果)，非命令返回 None。"""
+    t = text.strip()
+    m = BASE64_ENC.match(t)
+    if m:
+        raw = m.group(1).strip()
+        return (True, base64.b64encode(raw.encode("utf-8")).decode("ascii"))
+    m = BASE64_DEC.match(t)
+    if m:
+        raw = m.group(1).strip()
+        try:
+            return (True, base64.b64decode(raw, validate=True).decode("utf-8"))
+        except Exception:
+            return (False, "解码失败：这不是合法的 base64 字符串")
+    return None
+
+
 _WEEKDAYS = "一二三四五六日"
 
 
@@ -489,6 +512,14 @@ async def _(event: GroupMessageEvent):
     ]
     images = [u for u in images if u]
 
+    # base64 编解码：仅主人可用，确定性命令，不进 AI
+    res = _try_base64(user_msg)
+    if res is not None:
+        if bool(cfg.master_qq) and event.user_id == cfg.master_qq:
+            ok, result = res
+            await ai.send(Message(MessageSegment.text(result)))
+        return
+
     if event.is_tome():
         _last_at[gid] = now
 
@@ -550,6 +581,14 @@ async def _(event: PrivateMessageEvent):
     ]
     images = [u for u in images if u]
     if not user_msg and not images:
+        return
+
+    # base64 编解码：仅主人可用，确定性命令，不进 AI
+    res = _try_base64(user_msg)
+    if res is not None:
+        if bool(cfg.master_qq) and event.user_id == cfg.master_qq:
+            ok, result = res
+            await ai.send(Message(MessageSegment.text(result)))
         return
 
     speaker = event.sender.nickname or str(event.user_id)
