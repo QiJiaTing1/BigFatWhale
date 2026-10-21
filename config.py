@@ -155,6 +155,16 @@ class MemoryConfig:
 
 
 @dataclass(frozen=True)
+class EmotionalMemoryConfig:
+    """情感记忆：记住群友近期情绪 + 群里人际关系。情绪指数衰减、关系长期。"""
+
+    half_life_days: float
+    min_intensity: float
+    max_days: int
+    max_use_chars: int
+
+
+@dataclass(frozen=True)
 class PersonaConfig:
     nickname: str
     prompt: str
@@ -259,6 +269,7 @@ class Config:
     ai: AIConfig
     context: ContextConfig
     memory: MemoryConfig
+    emotion: EmotionalMemoryConfig
     persona: PersonaConfig
     emoji: EmojiConfig
     schedule: ScheduleConfig
@@ -327,6 +338,18 @@ def _build_memory() -> MemoryConfig:
         archive_max_chars=archive_max,
         max_use_chars=use_max,
         pending_keep=_as_int("MEM_PENDING_KEEP", 200, 10, 100_000),
+    )
+
+
+def _build_emotional_memory() -> EmotionalMemoryConfig:
+    half_life = _as_float("EMO_HALF_LIFE_DAYS", 3.0, 0.5, 365.0)
+    min_i = _as_float("EMO_MIN_INTENSITY", 0.15, 0.0, 1.0)
+    max_days = _as_int("EMO_MAX_DAYS", 30, 1, 3650)
+    return EmotionalMemoryConfig(
+        half_life_days=half_life,
+        min_intensity=min_i,
+        max_days=max_days,
+        max_use_chars=_as_int("EMO_MAX_CHARS", 600, 100, 100_000),
     )
 
 
@@ -429,6 +452,7 @@ def load_config(env_file: Path | None = None, reload: bool = False) -> Config:
         ai=_build_ai(),
         context=_build_context(),
         memory=_build_memory(),
+        emotion=_build_emotional_memory(),
         persona=_build_persona(),
         emoji=EmojiConfig(dir=EMOJI_DIR, moods=MOODS, exts=IMG_EXTS),
         schedule=_build_schedule(),

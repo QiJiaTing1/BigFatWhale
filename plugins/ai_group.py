@@ -21,6 +21,7 @@ from nonebot.adapters.onebot.v11 import (  # noqa: E402
 )
 
 from config import get_config, redact  # noqa: E402
+from plugins import emotion_memory as etm  # noqa: E402
 from plugins import long_memory as ltm  # noqa: E402
 from plugins import reply_log  # noqa: E402
 from plugins import tts  # noqa: E402
@@ -204,6 +205,7 @@ async def _maybe_search(
     context: str,
     images: list[str],
     long_term: str,
+    emotion: str = "",
 ) -> str:
     """模型回复带 [搜索:xx]/[抓取:url] 时，执行检索并把结果回填、二次问模型。
 
@@ -227,7 +229,7 @@ async def _maybe_search(
             "【我刚帮你查到的资料，据此回答，这次别再用 [搜索:/[抓取:] 标记】：\n"
             f"{info}"
         )
-        reply = await call_ai(followup, context, images, long_term)
+        reply = await call_ai(followup, context, images, long_term, emotion)
     reply = SEARCH_TAG.sub("", reply)
     reply = FETCH_TAG.sub("", reply)
     return reply.strip()
@@ -358,6 +360,7 @@ async def call_ai(
     context: str = "",
     images: list[str] | None = None,
     long_term: str = "",
+    emotion: str = "",
     retries: int | None = None,
 ) -> str:
     """调用大模型。
@@ -365,11 +368,14 @@ async def call_ai(
     - context：最近群聊记录
     - images：本次消息里的图片 URL（多模态看图）
     - long_term：长期记忆档案（**紧跟 system prompt**，位置固定便于命中上下文缓存）
+    - emotion：情感档案（紧跟事实档案之后、上下文之前，位置固定）
     """
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     if long_term:
         # 固定位置：system prompt 之后立刻放，且内容变动不频繁 → 有利于服务端前缀缓存
         messages.append({"role": "user", "content": long_term})
+    if emotion:
+        messages.append({"role": "user", "content": emotion})
     if context:
         messages.append(
             {
@@ -481,8 +487,9 @@ async def _reply_and_send(
             )
 
     long_term = ltm.archive_text(mem_key)
-    reply = await call_ai(user_msg, context, images, long_term)
-    reply = await _maybe_search(reply, user_msg, context, images, long_term)
+    emotion = etm.emotion_text(mem_key)
+    reply = await call_ai(user_msg, context, images, long_term, emotion)
+    reply = await _maybe_search(reply, user_msg, context, images, long_term, emotion)
 
     # 提取并移除回复里的 [表情:xxx] 标记
     mood = ""
@@ -537,8 +544,9 @@ async def _(event: GroupMessageEvent):
     name = event.sender.card or event.sender.nickname or str(event.user_id)
     _history[event.group_id].append((name, text or "[发了一张图片]", False, _now_hm()))
 
-    # 同时丢进长期记忆的"待合并"缓冲（攒够了后台自动合并成档案）
+    # 同时丢进长期记忆 + 情感记忆的"待合并"缓冲（攒够了后台自动合并成档案）
     ltm.add_pending(event.group_id, name, text or "[发了一张图片]")
+    etm.add_pending(event.group_id, name, text or "[发了一张图片]")
 
 
 @collector.handle()
@@ -551,6 +559,7 @@ async def _(event: PrivateMessageEvent):
     name = event.sender.nickname or str(event.user_id)
     _history[event.user_id].append((name, text or "[发了一张图片]", False, _now_hm()))
     ltm.add_pending(event.user_id, name, text or "[发了一张图片]")
+    etm.add_pending(event.user_id, name, text or "[发了一张图片]")
 
 
 @ai.handle()

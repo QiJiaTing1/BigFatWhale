@@ -27,6 +27,7 @@ from nonebot.adapters.onebot.v11 import Message, MessageSegment  # noqa: E402
 
 from config import get_config  # noqa: E402
 from plugins.ai_group import call_ai, pick_emoji, split_reply  # noqa: E402
+from plugins import emotion_memory as etm  # noqa: E402
 from plugins import long_memory as ltm  # noqa: E402
 from plugins import reply_log  # noqa: E402
 
@@ -110,11 +111,12 @@ async def night() -> None:
 
 @scheduler.scheduled_job("cron", hour=12, minute=0, id="daily_memory")
 async def daily_memory() -> None:
-    """每天中午 12 点把群里和私聊攒的消息合并进「长期记忆档案」（兜底）。
+    """每天中午 12 点把群里和私聊攒的消息合并进「长期记忆档案」+「情感档案」（兜底）。
 
     平时攒够 MEM_CONSOLIDATE_EVERY 条就会自动合并一次，这里是保底，防止消息一直没攒够。
     """
     await ltm.consolidate_all()
+    await etm.consolidate_all()
 
 
 @scheduler.scheduled_job("cron", minute="*", id="class_reminder")
