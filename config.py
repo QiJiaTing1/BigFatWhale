@@ -231,6 +231,17 @@ class TTSConfig:
 
 
 @dataclass(frozen=True)
+class OfflineGuardConfig:
+    """掉线守护：QQ 登录失效导致 NapCat 掉线时，自动重启容器尝试快速重登，
+    失败则通过 Server 酱微信推送告警。留空 sendkey = 只重启不告警。"""
+
+    serverchan_sendkey: str
+    auto_restart: bool
+    webui_url: str
+    webui_token: str
+
+
+@dataclass(frozen=True)
 class NetworkConfig:
     """反向 WS 监听地址：NapCat 里填的对端 URL 必须能对上（`ws://host:port/onebot/v11/ws`）。"""
 
@@ -254,6 +265,7 @@ class Config:
     reply_log: ReplyLogConfig
     reply: ReplyConfig
     tts: TTSConfig
+    offline_guard: OfflineGuardConfig
     network: NetworkConfig
     allow_groups: frozenset[int] = field(default_factory=frozenset)
     master_qq: int = 0
@@ -338,6 +350,15 @@ def _build_tts() -> TTSConfig:
     )
 
 
+def _build_offline_guard() -> OfflineGuardConfig:
+    return OfflineGuardConfig(
+        serverchan_sendkey=_raw("SERVERCHAN_SENDKEY", ""),
+        auto_restart=_as_bool("OFFLINE_AUTO_RESTART", True),
+        webui_url=_raw("NAPCHAT_WEBUI_URL", ""),
+        webui_token=_raw("NAPCHAT_WEBUI_TOKEN", ""),
+    )
+
+
 def _build_persona() -> PersonaConfig:
     nickname = _raw("BOT_NICKNAME", "鲸鱼娘")
     if not PERSONA_FILE.exists():
@@ -416,6 +437,7 @@ def load_config(env_file: Path | None = None, reload: bool = False) -> Config:
                           line_gap=_as_float("REPLY_LINE_GAP", 0.6, 0.0, 10.0),
                           mention=_as_bool("REPLY_MENTION", False)),
         tts=_build_tts(),
+        offline_guard=_build_offline_guard(),
         network=NetworkConfig(host=_raw("HOST", "127.0.0.1") or "127.0.0.1",
                               port=_as_int("PORT", 8080, 1, 65535)),
         allow_groups=frozenset(_as_group_set("ALLOW_GROUPS")),
