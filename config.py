@@ -165,6 +165,23 @@ class EmotionalMemoryConfig:
 
 
 @dataclass(frozen=True)
+class ProactiveConfig:
+    """主动发消息：主人私聊偶尔主动关心/闲聊一句。
+
+    两段式决策——先过确定性闸门（开关/对象/静默时段/当日条数/减速窗口/随机中签），
+    全部命中才调一次大模型；默认闭嘴，尽量不打扰主人。
+    """
+
+    enabled: bool
+    quiet_start: int      # 静默开始小时（含），如 23
+    quiet_end: int        # 静默结束小时（不含），如 9
+    max_per_day: int      # 每天最多主动发几条
+    tick_minutes: int     # 每隔几分钟检查一次
+    hit_rate: float       # 每次检查命中概率（0~1）
+    cooldown_hours: float  # 主人最近 N 小时回过话就跳过（有回应就少打扰）
+
+
+@dataclass(frozen=True)
 class PersonaConfig:
     nickname: str
     prompt: str
@@ -270,6 +287,7 @@ class Config:
     context: ContextConfig
     memory: MemoryConfig
     emotion: EmotionalMemoryConfig
+    proactive: ProactiveConfig
     persona: PersonaConfig
     emoji: EmojiConfig
     schedule: ScheduleConfig
@@ -350,6 +368,18 @@ def _build_emotional_memory() -> EmotionalMemoryConfig:
         min_intensity=min_i,
         max_days=max_days,
         max_use_chars=_as_int("EMO_MAX_CHARS", 600, 100, 100_000),
+    )
+
+
+def _build_proactive() -> ProactiveConfig:
+    return ProactiveConfig(
+        enabled=_as_bool("PROACTIVE_ENABLED", False),
+        quiet_start=_as_int("PROACTIVE_QUIET_START", 23, 0, 23),
+        quiet_end=_as_int("PROACTIVE_QUIET_END", 9, 0, 23),
+        max_per_day=_as_int("PROACTIVE_MAX_PER_DAY", 2, 0, 24),
+        tick_minutes=_as_int("PROACTIVE_TICK_MINUTES", 45, 5, 720),
+        hit_rate=_as_float("PROACTIVE_HIT_RATE", 0.3, 0.0, 1.0),
+        cooldown_hours=_as_float("PROACTIVE_COOLDOWN_HOURS", 6.0, 0.0, 168.0),
     )
 
 
@@ -453,6 +483,7 @@ def load_config(env_file: Path | None = None, reload: bool = False) -> Config:
         context=_build_context(),
         memory=_build_memory(),
         emotion=_build_emotional_memory(),
+        proactive=_build_proactive(),
         persona=_build_persona(),
         emoji=EmojiConfig(dir=EMOJI_DIR, moods=MOODS, exts=IMG_EXTS),
         schedule=_build_schedule(),
