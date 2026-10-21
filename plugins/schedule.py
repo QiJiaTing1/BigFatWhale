@@ -108,9 +108,9 @@ async def night() -> None:
     await _push(text, "晚安")
 
 
-@scheduler.scheduled_job("cron", hour=4, minute=30, id="daily_memory")
+@scheduler.scheduled_job("cron", hour=12, minute=0, id="daily_memory")
 async def daily_memory() -> None:
-    """每天凌晨 4:30 把群里攒的消息合并进「长期记忆档案」（兜底）。
+    """每天中午 12 点把群里和私聊攒的消息合并进「长期记忆档案」（兜底）。
 
     平时攒够 MEM_CONSOLIDATE_EVERY 条就会自动合并一次，这里是保底，防止消息一直没攒够。
     """
@@ -137,3 +137,57 @@ async def class_reminder() -> None:
                 "请你以群里沙雕群友的口吻提醒一句，1~2 句话，别太正经）"
             )
             await _push(text, f"上课提醒·{name}")
+
+
+# ==================== 每周内存报警 ====================
+
+MEM_ALERT_DOW = "mon"     # 每周哪天检查（mon~sun）
+MEM_ALERT_HOUR = 10       # 几点
+MEM_ALERT_MINUTE = 0      # 几分
+MEM_ALERT_PCT = 80        # 内存使用率超过这个百分比就报警
+
+
+def _mem_usage() -> tuple[float, float, float]:
+    """读 /proc/meminfo，返回 (总GB, 已用GB, 使用率%)。失败返回 (0,0,0)。"""
+    total = avail = 0
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1])
+    except OSError:
+        return 0.0, 0.0, 0.0
+    used = total - avail
+    pct = (used / total * 100) if total else 0.0
+    return total / 1024 / 1024, used / 1024 / 1024, pct
+
+
+@scheduler.scheduled_job("cron", day_of_week=MEM_ALERT_DOW, hour=MEM_ALERT_HOUR,
+                         minute=MEM_ALERT_MINUTE, id="weekly_memory_alert")
+async def weekly_memory_alert() -> None:
+    """每周一次检查服务器内存，超过阈值给主人报警（正常也顺带报一声）。"""
+    if not cfg.master_qq:
+        nonebot.logger.warning("[schedule] 没填 MASTER_QQ，内存报警跳过")
+        return
+    total, used, pct = _mem_usage()
+    if pct >= MEM_ALERT_PCT:
+        prompt = (
+            f"（系统告警：服务器内存占用 {pct:.0f}%（共 {total:.1f}GB，已用 {used:.1f}GB），"
+            f"已超过 {MEM_ALERT_PCT}% 报警线。请你以鲸鱼娘的口吻提醒主人：服务器内存吃紧了，"
+            f"该清理或扩内存了。1~2 句话，别啰嗦。）"
+        )
+    else:
+        prompt = (
+            f"（系统周报：服务器内存占用 {pct:.0f}%（共 {total:.1f}GB，已用 {used:.1f}GB），"
+            f"一切正常。请你以鲸鱼娘的口吻随口跟主人报一句内存情况，1 句话，别啰嗦。）"
+        )
+    text = await call_ai(prompt)
+    try:
+        bot = nonebot.get_bot()
+        await bot.send_private_msg(user_id=cfg.master_qq, message=Message(text))
+        reply_log.record(group_id=cfg.master_qq, speaker="", user_msg="内存报警",
+                         reply=text, mood="", kind="scheduled")
+    except Exception as e:  # noqa: BLE001
+        nonebot.logger.warning(f"[schedule] 内存报警发送失败：{e}")
