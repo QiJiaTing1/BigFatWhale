@@ -174,6 +174,7 @@ MERGE_PROMPT = """你是「记忆整理员」。任务：把一个 QQ 群的【�
 - 与已有条目**矛盾** → op="update"（以新信息为准，**不要两条并存**）
 - 已失效/已过时 → op="delete"
 - 重复的不要重复记；同一个人同一属性只留一条最新的。
+- 过时的、很久没再提的、被新信息推翻的，果断 op="delete"——记错比忘了更糟，别舍不得删。
 - 每条 fact 不超过 30 字，写清楚"谁 + 什么事"。
 
 【硬性要求】合并后档案总字数不得超过 {max_chars} 字。超了就把最不重要的条目删掉。
@@ -229,6 +230,28 @@ def _norm_fact(subject: str, fact: str) -> tuple[str, str]:
     return subject, fact
 
 
+def _norm(s: str) -> str:
+    """去空白和标点，用来判断两条 fact 是不是「换汤不换药」的近义重复。"""
+    return re.sub(r"[\W_]+", "", s or "")
+
+
+def _is_dup(subject: str, fact: str, items: list) -> bool:
+    """同一个人、同一条属性已存在（含近义重复）就返回 True，避免两条矛盾并存。"""
+    subj = subject or "群友"
+    nf = _norm(fact)
+    if len(nf) < 2:
+        return False
+    for it in items:
+        if (it.get("subject") or "群友") != subj:
+            continue
+        other = _norm(it.get("fact", ""))
+        if len(other) < 2:
+            continue
+        if nf in other or other in nf:
+            return True
+    return False
+
+
 def _apply_ops(gid: int, ops: list) -> tuple[int, int, int]:
     """执行 ADD/UPDATE/DELETE，返回 (新增, 修改, 删除) 数量。"""
     items = _archive.setdefault(str(gid), [])
@@ -247,8 +270,8 @@ def _apply_ops(gid: int, ops: list) -> tuple[int, int, int]:
         )
 
         if kind == "add" and fact:
-            if any(it.get("fact") == fact for it in items):
-                continue  # 完全重复，跳过
+            if _is_dup(subject, fact, items):
+                continue  # 重复或近义重复，跳过
             items.append(
                 {
                     "id": next_id,

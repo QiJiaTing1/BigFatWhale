@@ -268,12 +268,59 @@ def _try_base64(text: str) -> tuple[bool, str] | None:
     return None
 
 
+# 抓图表情包命令：`抓图 [数量] <主题>`，例如「抓图 10 鲸鱼娘」/「抓图 鲸鱼娘」
+CRAWL_RE = re.compile(r"^(?:抓图|抓表情包)\s*(?:(\d{1,3})\s*张?\s+)?(.+)$")
+
+
+async def _crawl_command(user_msg: str) -> str | None:
+    """抓图命令。命中就执行并返回要发出去的结果；非命令返回 None。"""
+    m = CRAWL_RE.match(user_msg.strip())
+    if not m:
+        return None
+    count = min(max(int(m.group(1)) if m.group(1) else 10, 1), 30)
+    topic = m.group(2).strip()
+    await ai.send(Message(MessageSegment.text(f"收到，去给主人抓「{topic}」的表情包，稍等…")))
+    import plugins.emoji_crawl as ec  # 惰性导入，避免和 emoji_crawl 相互引用
+    try:
+        return await ec.crawl(topic, count)
+    except Exception as e:  # noqa: BLE001
+        return f"抓图出错了：{type(e).__name__}: {e}"
+
+
+# 存图命令：主人发图 + 文字里带情绪词，把图存进 表情包/<情绪>/（仅主人）
+SAVE_WORDS = ("存", "放", "收", "归档", "保存", "归类")
+
+
+async def _try_save_emoji(user_msg: str, images: list[str]) -> str | None:
+    """存图命令。命中就存图并返回结果；非命令返回 None。"""
+    if not images:
+        return None
+    mood = next((m for m in cfg.emoji.moods if m in user_msg), None)
+    if mood is None or not any(w in user_msg for w in SAVE_WORDS):
+        return None
+    import plugins.emoji_crawl as ec  # 惰性导入，避免和 emoji_crawl 相互引用
+    ok = 0
+    for u in images[:5]:
+        try:
+            if await ec.save_image(u, mood):
+                ok += 1
+        except Exception:  # noqa: BLE001
+            continue
+    if ok:
+        return f"收好了，{ok} 张图存进「{mood}」啦。"
+    return "这张图没存进去（下载失败或格式不对），换张再试试。"
+
+
 _WEEKDAYS = "一二三四五六日"
 
 
 def _now_text() -> str:
     lt = time.localtime()
     return f"{lt.tm_year}-{lt.tm_mon:02d}-{lt.tm_mday:02d} {lt.tm_hour:02d}:{lt.tm_min:02d}（周{_WEEKDAYS[lt.tm_wday]}）"
+
+
+def _now_hm() -> str:
+    return time.strftime("%H:%M")
 
 
 # 余额查询：带 5 分钟缓存，别每条消息都去查一次
@@ -488,10 +535,22 @@ async def _(event: GroupMessageEvent):
     if not text and not has_img:
         return
     name = event.sender.card or event.sender.nickname or str(event.user_id)
-    _history[event.group_id].append((name, text or "[发了一张图片]", False))
+    _history[event.group_id].append((name, text or "[发了一张图片]", False, _now_hm()))
 
     # 同时丢进长期记忆的"待合并"缓冲（攒够了后台自动合并成档案）
     ltm.add_pending(event.group_id, name, text or "[发了一张图片]")
+
+
+@collector.handle()
+async def _(event: PrivateMessageEvent):
+    # 私聊也记进长期记忆 + 短期上下文：攒够 MEM_CONSOLIDATE_EVERY 条自动合并，每天 12 点兜底
+    text = event.get_plaintext().strip()
+    has_img = any(seg.type == "image" for seg in event.get_message())
+    if not text and not has_img:
+        return
+    name = event.sender.nickname or str(event.user_id)
+    _history[event.user_id].append((name, text or "[发了一张图片]", False, _now_hm()))
+    ltm.add_pending(event.user_id, name, text or "[发了一张图片]")
 
 
 @ai.handle()
@@ -520,6 +579,20 @@ async def _(event: GroupMessageEvent):
             await ai.send(Message(MessageSegment.text(result)))
         return
 
+    # 抓图表情包：仅主人可用
+    if bool(cfg.master_qq) and event.user_id == cfg.master_qq:
+        crawl_out = await _crawl_command(user_msg)
+        if crawl_out is not None:
+            await ai.send(Message(MessageSegment.text(crawl_out)))
+            return
+
+    # 存图表情包：仅主人，发图 + 指定情绪
+    if bool(cfg.master_qq) and event.user_id == cfg.master_qq:
+        save_out = await _try_save_emoji(user_msg, images)
+        if save_out is not None:
+            await ai.send(Message(MessageSegment.text(save_out)))
+            return
+
     if event.is_tome():
         _last_at[gid] = now
 
@@ -538,8 +611,8 @@ async def _(event: GroupMessageEvent):
     # 取该群最近记录，排除最后一条（就是当前这条消息），再截取最近 HISTORY_USE 条
     hist = list(_history[gid])[:-1][-cfg.context.history_use:]
     context = "\n".join(
-        f"{f'{NICKNAME}(我自己)' if is_bot else name}: {text[:cfg.context.max_len_per_msg]}"
-        for name, text, is_bot in hist
+        f"[{ts}] {f'{NICKNAME}(我自己)' if is_bot else name}: {text[:cfg.context.max_len_per_msg]}"
+        for name, text, is_bot, ts in hist
     )
 
     # 把"当前是谁在说话"标清楚，免得它认错人、前言不搭后语
@@ -565,7 +638,7 @@ async def _(event: GroupMessageEvent):
 
     # 把自己的回复也存进上下文
     if reply is not None:
-        _history[gid].append(("", reply or "[只发了一张表情包]", True))
+        _history[gid].append(("", reply or "[只发了一张表情包]", True, _now_hm()))
 
 
 @ai.handle()
@@ -591,12 +664,31 @@ async def _(event: PrivateMessageEvent):
             await ai.send(Message(MessageSegment.text(result)))
         return
 
+    # 抓图表情包：仅主人可用
+    if bool(cfg.master_qq) and event.user_id == cfg.master_qq:
+        crawl_out = await _crawl_command(user_msg)
+        if crawl_out is not None:
+            await ai.send(Message(MessageSegment.text(crawl_out)))
+            return
+
+    # 存图表情包：仅主人，发图 + 指定情绪
+    if bool(cfg.master_qq) and event.user_id == cfg.master_qq:
+        save_out = await _try_save_emoji(user_msg, images)
+        if save_out is not None:
+            await ai.send(Message(MessageSegment.text(save_out)))
+            return
+
     speaker = event.sender.nickname or str(event.user_id)
     raw_msg = user_msg
     is_master = bool(cfg.master_qq) and event.user_id == cfg.master_qq
     who = "主人" if is_master else speaker
 
-    # 私聊没群上下文；长期记忆/日志用 user_id 当 key
+    # 私聊短期上下文：最近几条（排除当前这条）；长期记忆/日志用 user_id 当 key
+    hist = list(_history[event.user_id])[:-1][-cfg.context.history_use:]
+    context = "\n".join(
+        f"[{ts}] {f'{NICKNAME}(我自己)' if is_bot else name}: {text[:cfg.context.max_len_per_msg]}"
+        for name, text, is_bot, ts in hist
+    )
     explicit = await _explicit_search(user_msg, who)
     if explicit is not None:
         user_msg = explicit
@@ -609,8 +701,10 @@ async def _(event: PrivateMessageEvent):
     else:
         user_msg = f"{who}说：{user_msg}"
 
-    await _reply_and_send(
-        user_msg=user_msg, raw_msg=raw_msg, images=images, context="",
+    reply = await _reply_and_send(
+        user_msg=user_msg, raw_msg=raw_msg, images=images, context=context,
         mem_key=event.user_id, speaker=speaker, mention=[], started=started,
         is_master=is_master,
     )
+    if reply is not None:
+        _history[event.user_id].append(("", reply or "[只发了一张表情包]", True, _now_hm()))
