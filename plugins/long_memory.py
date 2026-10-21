@@ -34,6 +34,7 @@ if str(ROOT) not in sys.path:
 import nonebot  # noqa: E402
 
 from config import get_config  # noqa: E402
+from memory_util import relevance_gate  # noqa: E402
 
 cfg = get_config()
 
@@ -97,9 +98,13 @@ _load()
 
 # ---------------------------------------------------------------- 读取
 
-def archive_text(gid: int) -> str:
-    """把该群的长期记忆档案格式化成一段文字，供拼进 prompt。没有就返回空串。"""
+def archive_text(gid: int, query: str = "") -> str:
+    """把该群的长期记忆档案格式化成一段文字，供拼进 prompt。没有就返回空串。
+
+    `query` 给当前消息原文时，档案偏大会先按相关性精简，减少「背台词」；不给则全量。
+    """
     items = _archive.get(str(gid)) or []
+    items = relevance_gate(items, query)
     if not items:
         return ""
     lines = [
@@ -168,6 +173,7 @@ MERGE_PROMPT = """你是「记忆整理员」。任务：把一个 QQ 群的【�
 
 【要记的】人物身份与昵称对应关系、稳定偏好、习惯、性格、重要约定、长期有效的事实。
 【不要记的】日常寒暄（哈哈/晚安/在吗）、一次性话题（今晚吃啥）、玩笑话、没信息的闲扯。
+【硬边界】这里只收「稳定事实」，不收「暂时情绪」——压力大、失眠、害怕、焦虑、担心、嫉妒、压抑、开心、难过、累、困、emo 这类心情/状态一律别记（有专门的情感记忆管，交给它）。fact 里也别夹带情绪词。
 
 【操作规则】
 - 新增 → op="add"

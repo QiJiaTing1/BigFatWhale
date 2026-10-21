@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
 import nonebot  # noqa: E402
 
 from config import get_config  # noqa: E402
+from memory_util import relevance_gate  # noqa: E402
 
 cfg = get_config()
 
@@ -119,12 +120,14 @@ def _forgotten(it: dict, today: date | None = None) -> bool:
 
 # ---------------------------------------------------------------- 读取
 
-def emotion_text(key: int) -> str:
+def emotion_text(key: int, query: str = "") -> str:
     """把该 key 的情感档案格式化成一段文字，供拼进 prompt。没有就返回空串。
 
-    读取时顺带过滤掉已衰减过期的情绪条目（关系不过滤）。
+    读取时顺带过滤掉已衰减过期的情绪条目（关系不过滤）；
+    `query` 给当前消息原文时，档案偏大再按相关性精简（关系条目永远保留）。
     """
     items = [it for it in (_archive.get(str(key)) or []) if not _forgotten(it)]
+    items = relevance_gate(items, query, always_keep=lambda it: it.get("kind") == "relation")
     lines = [
         f"- {it.get('subject') or '群友'}（{'情绪' if it.get('kind') == 'emotion' else '关系'}）：{it.get('fact', '')}"
         for it in items
@@ -136,9 +139,9 @@ def emotion_text(key: int) -> str:
     if len(body) > MAX_USE_CHARS:
         body = body[:MAX_USE_CHARS] + "\n…"
     return (
-        "【情感档案】以下是鲸鱼娘记住的、关于这个群近期情绪和人际关系的印象。"
-        "聊天时自然地共情、关心（比如记得谁最近不开心、谁和谁关系好），但别刻意背出来、别逐条念。"
-        "情绪是会过时的，太久没再提的就当没这回事：\n" + body
+        "【情感档案】以下是鲸鱼娘记住的、关于这个群的具体小事和印象（谁说过什么、发生过什么）。"
+        "这些是让你「心里有数」的，不是台词：只有自然相关、对方主动提起时才轻轻带一句，"
+        "别逐条念、别把「失恋/考研/压力大」硬拐回来当口头禅。情绪会过时，太久没再提就当没这回事：\n" + body
     )
 
 
@@ -191,22 +194,28 @@ async def consolidate_all() -> None:
 EMOTION_MERGE_PROMPT = """你是「情感整理员」。任务：从一个 QQ 群的聊天记录里，提炼出值得长期记住的「情绪」和「人际关系」。
 
 【情绪】谁最近是什么心情/状态（开心、难过、emo、压力大、生病、忙碌…），要能指导以后关心对方。
-【关系】谁和谁是什么关系/亲疏（关系好、不对付、喜欢、嫌弃、谁对鲸鱼娘什么态度），要稳定、长期有效。
+【关系】谁和谁是什么关系/亲疏（关系好、不对付、喜欢、嫌弃、谁对鲸鱼娘什么态度），要稳定、长期有效。只记聊天里明说或明显表现出来的，别凭一句玩笑臆测「他俩关系好/不对付」；拿不准就不记。
 
-【不要记】日常寒暄（哈哈/晚安/在吗）、一次性话题（今晚吃啥）、玩笑话、没信息量的闲扯、群里陌生人随口一句。
+【fact 怎么写：记具体小事和证据，别只记空泛评价】
+- 要写「发生了什么/谁说了什么」，让记忆自带证据，以后捡起来才不像背台词。
+- 别只写「小明心情低落」这种光有情绪词的评价；写「小明说分手了，这两天老熬夜」。
+- 关系也一样：别写「小明和小红关系好」，写「小明和小红常互怼、经常一起上分」。
+
+【不要记】日常寒暄（哈哈/晚安/在吗）、一次性话题（今晚吃啥）、玩笑话、没信息量的闲扯、群里陌生人随口一句、只有情绪词没有具体事的空泛评价；以及「如果/可能/也许/打算/计划/希望/准备/应该/要是」这类还没发生的假设、设想、打算——没发生的事不算状态；问句（"你会不会…"）多半也不是事实，别当成现状记。
+【硬边界】这里只记「情绪状态」和「人际关系」，别记身份/昵称对应、稳定偏好、习惯、性格、重要约定这类长期事实（那些归长期记忆管）。
 
 【操作规则】
 - 新增 → op="add"
 - 同一人同一类的新状态覆盖旧状态 → op="update"（带旧条目的 id），不要两条并存
 - 已过时/被新信息推翻 → op="delete"
 - 情绪要带 intensity（0~1，越强烈越接近 1，默认 0.5）；关系不带 intensity
-- fact 不超过 30 字，写清"谁 + 什么情绪/什么关系"
+- fact 不超过 40 字，写清「谁 + 具体发生了什么事 + 由此看出什么」
 - 没有值得记的就输出 {"ops":[]}
 
 只输出 JSON，不要任何解释、不要代码块以外的文字。
 
 输出格式：
-{"ops":[{"op":"add","subject":"小明","kind":"emotion","fact":"最近失恋心情低落","intensity":0.8},{"op":"add","subject":"小明↔小红","kind":"relation","fact":"关系很好常互怼"},{"op":"update","id":2,"fact":"已经缓过来了","intensity":0.3},{"op":"delete","id":5}]}
+{"ops":[{"op":"add","subject":"小明","kind":"emotion","fact":"说分手了，这两天老熬夜","intensity":0.8},{"op":"add","subject":"小明↔小红","kind":"relation","fact":"常互怼、经常一起上分"},{"op":"update","id":2,"fact":"今天说缓过来了，在约人打球","intensity":0.3},{"op":"delete","id":5}]}
 
 ========== 已有情感档案 ==========
 {archive}

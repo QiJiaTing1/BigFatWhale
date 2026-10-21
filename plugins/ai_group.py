@@ -35,18 +35,16 @@ _history: dict[int, deque] = defaultdict(lambda: deque(maxlen=cfg.context.histor
 # 每个群"最近一次被 @"的时间戳：@ 之后 AT_WINDOW 秒内发的图，也当成是发给它的
 _last_at: dict[int, float] = {}
 
-# 看图时随机挑一个"吐槽角度"注入，逼它每次换个说法（不然模型爱复读同一个梗）
+# 看图时随机挑一个"反应角度"注入，逼它每次换个说法；核心是结合上下文情绪，别看图作文
 IMAGE_ANGLES = [
-    "只挑图里最搞笑、最怪的一个细节说",
-    "阴阳怪气一下发图的人",
-    "把图里的东西跟群友（或者你自己）对比",
-    "假装一时没看懂，随便糊弄一句",
-    "夸张地夸上天，或者夸张地嫌弃",
-    "联想到一个完全不相关的梗",
-    "就发个怪叫或者两三个字（比如「？」「草」「好家伙」「逆天」）",
-    "用一个很欠揍的语气评价这张图",
-    "假装这图是你自己发的，然后开始瞎解释",
-    "从图里挑个东西胡乱开个脑洞",
+    "只给情绪反应（好笑/无语/被萌到/嫌弃），别描述图里有什么",
+    "接住上下文和对方此刻的情绪，图只顺嘴带一句",
+    "把图当对方心情的注脚，回他这个人，别点评画面",
+    "顺着上文往下说，图别展开",
+    "只甩一句感觉或一个梗，不拆解画面",
+    "就发个怪叫或两三个字（「？」「草」「好家伙」「逆天」）",
+    "故意答非所问，把话带到正聊的事上",
+    "欠揍地怼一句，别分析图",
 ]
 
 # 群聊不再只靠 @ 触发：消息里出现这些「鱼相关」关键词也主动搭话
@@ -313,6 +311,22 @@ async def _try_save_emoji(user_msg: str, images: list[str]) -> str | None:
     return "这张图没存进去（下载失败或格式不对），换张再试试。"
 
 
+def _is_command_text(text: str, has_img: bool) -> bool:
+    """命令类消息（不进上下文/记忆）：base64 编解码、@@ 搜索、抓图、存图、// 人生指南。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.startswith("//") or t.startswith("@@"):
+        return True
+    if _try_base64(t) is not None:
+        return True
+    if CRAWL_RE.match(t):
+        return True
+    if has_img and any(w in t for w in SAVE_WORDS) and any(m in t for m in cfg.emoji.moods):
+        return True
+    return False
+
+
 _WEEKDAYS = "一二三四五六日"
 
 
@@ -443,6 +457,26 @@ def pick_emoji(mood: str) -> Path | None:
     return None
 
 
+async def _run_life_guide(user_msg: str) -> None:
+    """// 人生决策指南：读 GitHub 指南正文后回答，不进记忆/上下文。"""
+    import plugins.life_guide as lg  # 惰性导入，避免循环依赖
+
+    q = user_msg[2:].strip()
+    if not q:
+        await ai.send(Message(MessageSegment.text(lg.USAGE)))
+        return
+    first = not lg.is_cached()
+    await ai.send(Message(MessageSegment.text(
+        "收到，去翻《高性价比人生指南》…" + ("（第一次用，正在下载正文，稍等）" if first else "")
+    )))
+    result = await lg.query(q)
+    lines = split_reply(result, cfg.reply.split_lines)
+    for i, ln in enumerate(lines):
+        await ai.send(Message(MessageSegment.text(ln)))
+        if i < len(lines) - 1:
+            await asyncio.sleep(cfg.reply.line_gap)
+
+
 # ------------------------------------------------------------------ 消息处理
 
 async def _reply_and_send(
@@ -456,6 +490,7 @@ async def _reply_and_send(
     mention: list,
     started: float,
     is_master: bool = False,
+    query: str = "",
 ) -> str | None:
     """调模型 → 拆 [表情:xxx] 标记 → 分句发送 → 语音 → 落日志。
 
@@ -486,8 +521,8 @@ async def _reply_and_send(
                 + user_msg
             )
 
-    long_term = ltm.archive_text(mem_key)
-    emotion = etm.emotion_text(mem_key)
+    long_term = ltm.archive_text(mem_key, query)
+    emotion = etm.emotion_text(mem_key, query)
     reply = await call_ai(user_msg, context, images, long_term, emotion)
     reply = await _maybe_search(reply, user_msg, context, images, long_term, emotion)
 
@@ -541,6 +576,8 @@ async def _(event: GroupMessageEvent):
     has_img = any(seg.type == "image" for seg in event.get_message())
     if not text and not has_img:
         return
+    if _is_command_text(text, has_img):
+        return
     name = event.sender.card or event.sender.nickname or str(event.user_id)
     _history[event.group_id].append((name, text or "[发了一张图片]", False, _now_hm()))
 
@@ -555,6 +592,8 @@ async def _(event: PrivateMessageEvent):
     text = event.get_plaintext().strip()
     has_img = any(seg.type == "image" for seg in event.get_message())
     if not text and not has_img:
+        return
+    if _is_command_text(text, has_img):
         return
     name = event.sender.nickname or str(event.user_id)
     _history[event.user_id].append((name, text or "[发了一张图片]", False, _now_hm()))
@@ -602,6 +641,11 @@ async def _(event: GroupMessageEvent):
             await ai.send(Message(MessageSegment.text(save_out)))
             return
 
+    # 人生决策指南：仅主人，// 触发
+    if bool(cfg.master_qq) and event.user_id == cfg.master_qq and user_msg.startswith("//"):
+        await _run_life_guide(user_msg)
+        return
+
     if event.is_tome():
         _last_at[gid] = now
 
@@ -642,7 +686,7 @@ async def _(event: GroupMessageEvent):
     reply = await _reply_and_send(
         user_msg=user_msg, raw_msg=raw_msg, images=images, context=context,
         mem_key=gid, speaker=speaker, mention=mention, started=started,
-        is_master=is_master,
+        is_master=is_master, query=raw_msg,
     )
 
     # 把自己的回复也存进上下文
@@ -686,6 +730,11 @@ async def _(event: PrivateMessageEvent):
         if save_out is not None:
             await ai.send(Message(MessageSegment.text(save_out)))
             return
+
+    # 人生决策指南：仅主人，// 触发
+    if bool(cfg.master_qq) and event.user_id == cfg.master_qq and user_msg.startswith("//"):
+        await _run_life_guide(user_msg)
+        return
 
     speaker = event.sender.nickname or str(event.user_id)
     raw_msg = user_msg
